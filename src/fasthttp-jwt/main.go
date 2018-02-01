@@ -16,28 +16,32 @@ func init() {
 var JWTSignKey = []byte("TestForFasthttpWithJWT")
 
 type UserCredential struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
+	Username []byte `json:"username"`
+	Password []byte `json:"password"`
 	jwt.StandardClaims
 }
 
-func createTokenString(username string, password string) string {
+func createToken(username []byte, password []byte) (string, time.Time) {
 	logger.Debugf("Create new token for user %s", username)
 
+	expireAt := time.Now().Add(1 * time.Minute)
+
 	// Embed User information to `token`
-	newToken := jwt.NewWithClaims(jwt.SigningMethodHS256, &UserCredential{
+	newToken := jwt.NewWithClaims(jwt.SigningMethodHS512, &UserCredential{
 		Username: username,
 		Password: password,
 		StandardClaims: jwt.StandardClaims{
-			ExpiresAt: time.Now().Add(1 * time.Minute).Unix(),
+			ExpiresAt: expireAt.Unix(),
 		},
 	})
+
 	// token -> string. Only server knows this secret (foobar).
-	tokenstring, err := newToken.SignedString(JWTSignKey)
+	tokenString, err := newToken.SignedString(JWTSignKey)
 	if err != nil {
 		logger.Error(err)
 	}
-	return tokenstring
+
+	return tokenString, expireAt
 }
 
 func JWTValidate(requestToken string) (*jwt.Token, *UserCredential, error) {
@@ -52,37 +56,54 @@ func JWTValidate(requestToken string) (*jwt.Token, *UserCredential, error) {
 
 	// In another way, you can decode token to your struct, which needs to satisfy `jwt.StandardClaims`
 	user := &UserCredential{}
-	rToken, err := jwt.ParseWithClaims(requestToken, user, func(token *jwt.Token) (interface{}, error) {
+	token, err := jwt.ParseWithClaims(requestToken, user, func(token *jwt.Token) (interface{}, error) {
 		return JWTSignKey, nil
 	})
 
-	return rToken, user, err
+	return token, user, err
 }
 
 func Login(ctx *fasthttp.RequestCtx) {
-	user := ctx.QueryArgs().Peek("user")
-	passwd := ctx.QueryArgs().Peek("passwd")
-	userToken := string(ctx.QueryArgs().Peek("token"))
+	qUser := ctx.QueryArgs().Peek("user")
+	qPasswd := ctx.QueryArgs().Peek("passwd")
+	fasthttpJwtCookie := ctx.Request.Header.Cookie("fasthttp_jwt")
 
 	// for example, server receive token string in request header.
-	if len(userToken) == 0 {
-		userToken = createTokenString(string(user), string(passwd))
+	if len(fasthttpJwtCookie) == 0 {
+		tokenString, expireAt := createToken(qUser, qPasswd)
+
+		// Set cookie for domain
+		cookie := fasthttp.AcquireCookie()
+		cookie.SetDomain("localhost")
+		cookie.SetKey("fasthttp_jwt")
+		cookie.SetValue(tokenString)
+		cookie.SetExpire(expireAt)
+		ctx.Response.Header.SetCookie(cookie)
+	}
+}
+
+func CheckToken(ctx *fasthttp.RequestCtx) {
+	fasthttpJwtCookie := ctx.Request.Header.Cookie("fasthttp_jwt")
+
+	if len(fasthttpJwtCookie) == 0 {
+		fmt.Fprint(ctx, "Login required...")
+		return
 	}
 
-	rToken, userData, err := JWTValidate(userToken)
+	token, _, err := JWTValidate(string(fasthttpJwtCookie))
 
-	fmt.Println("ExpireAt: ", time.Unix(userData.ExpiresAt, 0).String())
-
-	if err != nil {
-		fmt.Fprintf(ctx, "Token %s | Valid: %t | Error: %v", userToken, rToken.Valid, err)
-	} else {
-		fmt.Fprintf(ctx, "Token %s | Valid: %t", userToken, rToken.Valid)
+	if !token.Valid {
+		fmt.Fprint(ctx, "Your session is expired, login again please...")
+		return
 	}
+
+	fmt.Fprintf(ctx, "Token: %s | Valid: %t | Error: %v", token.Raw, token.Valid, err)
 }
 
 func main() {
 	router := fasthttprouter.New()
 	router.GET("/", Login)
+	router.GET("/check", CheckToken)
 
 	server := &fasthttp.Server{
 		Name:    "JWTTestServer",
