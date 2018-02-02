@@ -63,9 +63,14 @@ func JWTValidate(requestToken string) (*jwt.Token, *UserCredential, error) {
 	return token, user, err
 }
 
+func Index(ctx *fasthttp.RequestCtx) {
+	ctx.SetContentType("text/html")
+	fmt.Fprint(ctx, "<h1>Hola, estas en el Index...<h1>")
+}
+
 func Login(ctx *fasthttp.RequestCtx) {
-	qUser := ctx.QueryArgs().Peek("user")
-	qPasswd := ctx.QueryArgs().Peek("passwd")
+	qUser := []byte("savsgio")
+	qPasswd := []byte("mypasswd")
 	fasthttpJwtCookie := ctx.Request.Header.Cookie("fasthttp_jwt")
 
 	// for example, server receive token string in request header.
@@ -74,36 +79,54 @@ func Login(ctx *fasthttp.RequestCtx) {
 
 		// Set cookie for domain
 		cookie := fasthttp.AcquireCookie()
-		cookie.SetDomain("localhost")
 		cookie.SetKey("fasthttp_jwt")
 		cookie.SetValue(tokenString)
 		cookie.SetExpire(expireAt)
 		ctx.Response.Header.SetCookie(cookie)
 	}
+
+	ctx.Redirect("/", ctx.Response.StatusCode())
 }
 
-func CheckToken(ctx *fasthttp.RequestCtx) {
+func CheckTokenMiddleware(ctx *fasthttp.RequestCtx) bool {
 	fasthttpJwtCookie := ctx.Request.Header.Cookie("fasthttp_jwt")
 
 	if len(fasthttpJwtCookie) == 0 {
 		fmt.Fprint(ctx, "Login required...")
-		return
+		return false
 	}
 
 	token, _, err := JWTValidate(string(fasthttpJwtCookie))
 
 	if !token.Valid {
 		fmt.Fprint(ctx, "Your session is expired, login again please...")
-		return
+		return false
 	}
 
-	fmt.Fprintf(ctx, "Token: %s | Valid: %t | Error: %v", token.Raw, token.Valid, err)
+	if err != nil {
+		fmt.Fprint(ctx, err)
+		return false
+	}
+
+	return true
+}
+
+// BasicAuth is the basic auth handler
+func Middleware(handler fasthttp.RequestHandler) fasthttp.RequestHandler {
+	return fasthttp.RequestHandler(func(ctx *fasthttp.RequestCtx) {
+		if ok := CheckTokenMiddleware(ctx); !ok {
+			ctx.Redirect("/login", 403)
+			return
+		}
+
+		handler(ctx)
+	})
 }
 
 func main() {
 	router := fasthttprouter.New()
-	router.GET("/", Login)
-	router.GET("/check", CheckToken)
+	router.GET("/login", Login)
+	router.GET("/", Middleware(Index))
 
 	server := &fasthttp.Server{
 		Name:    "JWTTestServer",
